@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "glm-vision-mcp"
 version = "0.1.0"
-description = "GLM-4.6V-Flash 视觉 MCP Server：给纯文本大模型补上「眼睛」（describe-first：图片转结构化文字/OCR）"
+description = "视觉 MCP Server：通过智谱 GLM-4.6V-Flash 把图片转为结构化文字与 OCR 结果，为文本模型补充视觉理解能力"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"

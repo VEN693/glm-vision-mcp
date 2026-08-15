@@ -1,6 +1,6 @@
-# GLM-4.6V Vision MCP Server 使用与原理说明
+# GLM-Vision MCP Server 使用与原理说明
 
-一个基于智谱 GLM-4.6V-Flash 视觉模型的 MCP Server，作用是给纯文本大模型（例如 DeepSeek-V4-Flash）补上一双"眼睛"：当主模型读不懂图片时，调用它把图片转成结构化文字描述和 OCR 文本，再回到主模型继续推理。
+一个基于智谱 GLM-4.6V-Flash 视觉模型的 MCP Server，作用是给纯文本大模型（例如 DeepSeek-V4-Flash、DeepSeek-V4-Pro）补上一双"眼睛"(视觉理解）：当主模型读不懂图片时，调用它把图片转成结构化文字描述和 OCR 文本，再回到主模型继续推理。
 
 本 MCP 最初基于 GLM-4V-Flash，现已升级为 GLM-4.6V-Flash。两者同为免费模型、接口完全兼容，新模型在视觉理解精度、OCR 鲁棒性、上下文长度（128K）上全面占优，实测同一张测试图文字提取更完整。服务名固定为 `glm-vision`，不随模型版本变动。
 
@@ -131,7 +131,7 @@ pip install "mcp>=1.2.0,<2" requests
 """
 GLM-4.6V-Flash 视觉 MCP Server
 ==============================
-给纯文本模型（如 DeepSeek-V4-Flash）补上一双"眼睛"。
+为纯文本模型提供视觉理解能力（图片 → 结构化文字/OCR）。
 
 工作原理（describe-first 管线）：
     图片路径 -> 本工具读取并 base64 编码 -> 调用智谱 GLM-4.6V-Flash 视觉 API
@@ -257,7 +257,7 @@ def vision(
         "请用结构化、客观的语言输出，方便后续文本模型基于你的描述继续分析和推理。"
     ),
 ) -> str:
-    """识别一张图片，返回结构化文字描述（视觉"眼睛"）。
+    """识别一张图片，返回结构化文字描述与 OCR 文字。
 
     适用于截图、文档、图表、照片等。当主文本模型无法直接读取图片、
     或需要把图片内容转成文字再交给纯文本模型推理时，调用本工具。
@@ -319,14 +319,3 @@ if __name__ == "__main__":
 - MCP Server 直接读取本机文件系统，只应加载可信来源的项目配置，避免恶意 `mcp.json` 被自动执行。
 - 智谱 API 是远程第三方服务，调用会消耗其配额，是否免费及可用性以智谱官方说明为准，受网络与当地法律法规限制。
 - 图片会以 base64 形式上传到智谱服务器进行识别，涉及敏感图片时请评估隐私风险。
-
-## 十一、开源项目的安装与开发
-
-本目录同时是一个可 `pip` 安装的标准 Python 项目：
-
-- **安装（开发/自用）**：`pip install -e .`，或 `pip install -e ".[dev]"`（附带测试工具）。
-- **命令入口**：安装成功后可执行 `glm-vision` 直接启动服务，等价于 `python vision_server.py`。
-- **跑测试**：`pytest`。单元测试全部 mock 外部 HTTP，不需要网络或 API Key；含一个 stdio 冒烟测试（握手 + 工具列表）。
-- **客户端配置**：见 `examples/`——Z-Code 用嵌套 `mcp.servers`，TRAE / Claude Desktop / Cline / Cursor 用顶层 `mcpServers`。
-- **发布到 PyPI 后**：任何支持 MCP 的客户端可用 `"command": "uvx", "args": ["glm-vision-mcp"]` 免安装接入。
-- **许可证**：MIT（见 LICENSE），欢迎提 Issue 与 PR。
