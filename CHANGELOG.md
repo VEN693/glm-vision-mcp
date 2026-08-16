@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+- 429 限流自动降级模型：`glm-4.6v-flash` → `glm-4v-flash`。
+- 指数退避延长为 2s/4s/8s；限流重试耗尽返回可读错误。
+
 ## [0.1.0] - 2026-08-15
 
 - 初始可安装版本：`pip install -e .` 后获得 `glm-vision` 命令入口。

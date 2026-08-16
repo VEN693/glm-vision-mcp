@@ -32,7 +32,9 @@ from mcp.server.fastmcp import FastMCP  # 官方 Python SDK
 # 配置
 # ---------------------------------------------------------------------------
 ZHIPU_API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-MODEL = "glm-4.6v-flash"  # 免费模型，能力全面超过旧版 glm-4v-flash（128K 上下文、原生 Function Calling）
+# 优先使用新模型；429 限流重试耗尽后自动降级到旧免费模型
+MODEL = "glm-4.6v-flash"  # 首选：128K 上下文
+FALLBACK_MODEL = "glm-4v-flash"  # 降级：免费档限流更宽松
 
 # 从环境变量读取 key；若同目录存在 .env，则自动加载
 _DOT_ENV = Path(__file__).resolve().parent / ".env"
@@ -64,10 +66,10 @@ def _image_to_base64(image_path: str) -> tuple[str, str]:
 
 
 def _call_glm(image_data_url: str, prompt: str, timeout: int = 60) -> str:
-    """调用 GLM-4.6V-Flash 视觉接口，返回文字结果。
+    """调用视觉接口，返回文字结果。
 
-    免费模型偶发 429 限流与 5xx 服务端错误，属瞬时故障，
-    这里做最多 3 次指数退避重试（1s/2s/4s），仍失败才抛错。
+    优先使用 MODEL；429 限流在本模型上重试耗尽后，自动降级到
+    FALLBACK_MODEL 再试一次；两个模型都被限流则给出可读错误。
     """
     if not API_KEY:
         raise RuntimeError(
@@ -75,44 +77,47 @@ def _call_glm(image_data_url: str, prompt: str, timeout: int = 60) -> str:
             "并写入环境变量或本目录的 .env 文件。"
         )
 
-    payload = {
-        "model": MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_data_url}},
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ],
-    }
+    content = [
+        {"type": "image_url", "image_url": {"url": image_data_url}},
+        {"type": "text", "text": prompt},
+    ]
+
+    for model in (MODEL, FALLBACK_MODEL):
+        payload = {"model": model, "messages": [{"role": "user", "content": content}]}
+        resp = _try_request(payload, timeout)
+        if resp is not None:
+            data = resp.json()
+            if "error" in data:
+                raise RuntimeError(f"智谱 API 返回错误: {data['error']}")
+            return data["choices"][0]["message"]["content"]
+
+    raise RuntimeError("智谱接口持续限流(429)，glm-4.6v-flash 与 glm-4v-flash 均已重试，请稍后几分钟再试")
+
+
+def _try_request(payload: dict, timeout: int, max_retries: int = 2, backoff: float = 2.0):
+    """带退避地投递一次请求，返回可判定的 response。
+
+    429 与 5xx 属瞬时故障，指数退避重试（2s/4s/8s）；
+    429 重试耗尽返回 None（触发上层切换模型），5xx 重试耗尽抛错。
+    """
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
     }
-
-    # 429 限流与 5xx 服务端错误属瞬时故障，指数退避重试（1s/2s/4s）
-    max_retries = 3
-    backoff = 1.0
+    wait = backoff
     for attempt in range(max_retries + 1):
         resp = requests.post(
             ZHIPU_API_URL, headers=headers, json=payload, timeout=timeout
         )
         if resp.status_code != 429 and resp.status_code < 500:
-            break
+            return resp
         if attempt == max_retries:
-            break  # 重试耗尽，由下方 raise_for_status 抛出
-        time.sleep(backoff)
-        backoff *= 2
-
-    resp.raise_for_status()
-    data = resp.json()
-
-    if "error" in data:
-        raise RuntimeError(f"智谱 API 返回错误: {data['error']}")
-
-    return data["choices"][0]["message"]["content"]
+            if resp.status_code == 429:
+                return None  # 限流重试耗尽，交给调用方切换模型
+            resp.raise_for_status()
+        time.sleep(wait)
+        wait *= 2
+    return None  # 不可达
 
 
 # ---------------------------------------------------------------------------

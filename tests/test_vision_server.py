@@ -76,30 +76,61 @@ def test_call_glm_success(monkeypatch):
     assert post.call_args.kwargs["json"]["model"] == vs.MODEL
 
 
-def test_call_glm_retry_on_429_then_success(monkeypatch):
+def test_call_glm_retry_then_success(monkeypatch):
+    """同一模型内 429 属瞬时抖动：退避后成功，不触发降级。"""
     monkeypatch.setattr(vs, "API_KEY", "sk-test")
-    side = [_resp(429), _resp(200)]
     with (
-        mock.patch.object(vs.requests, "post", side_effect=side) as post,
+        mock.patch.object(vs.requests, "post", side_effect=[_resp(429), _resp(200)]) as post,
         mock.patch.object(vs.time, "sleep") as sleep,
     ):
         out = vs._call_glm("data:image/png;base64,AAAA", "p")
     assert out == "ok"
     assert post.call_count == 2
+    assert post.call_args_list[-1].kwargs["json"]["model"] == vs.MODEL
     sleep.assert_called_once()
 
 
-def test_call_glm_retries_exhausted(monkeypatch):
+def test_call_glm_fallback_model_on_rate_limit(monkeypatch):
+    """首选模型持续 429 重试耗尽后，自动切换到降级模型并成功。"""
     monkeypatch.setattr(vs, "API_KEY", "sk-test")
-    side = [_resp(429), _resp(500), _resp(429), _resp(500)]
+    seq = [_resp(429), _resp(429), _resp(429), _resp(200)]
     with (
-        mock.patch.object(vs.requests, "post", side_effect=side) as post,
+        mock.patch.object(vs.requests, "post", side_effect=seq) as post,
+        mock.patch.object(vs.time, "sleep") as sleep,
+    ):
+        out = vs._call_glm("data:image/png;base64,AAAA", "p")
+    assert out == "ok"
+    assert post.call_count == 4
+    assert sleep.call_count == 2
+    models = [c.kwargs["json"]["model"] for c in post.call_args_list]
+    assert models[:3] == [vs.MODEL] * 3
+    assert models[3] == vs.FALLBACK_MODEL
+
+
+def test_call_glm_both_models_rate_limited(monkeypatch):
+    """两个模型都被限流时返回可读错误。"""
+    monkeypatch.setattr(vs, "API_KEY", "sk-test")
+    with (
+        mock.patch.object(vs.requests, "post", return_value=_resp(429)) as post,
+        mock.patch.object(vs.time, "sleep") as sleep,
+    ):
+        with pytest.raises(RuntimeError, match="429"):
+            vs._call_glm("data:image/png;base64,AAAA", "p")
+    assert post.call_count == 6  # 2 个模型 × 3 次
+    assert sleep.call_count == 4
+
+
+def test_call_glm_5xx_exhausted_raises(monkeypatch):
+    """5xx 重试耗尽直接抛错，不触发模型降级。"""
+    monkeypatch.setattr(vs, "API_KEY", "sk-test")
+    with (
+        mock.patch.object(vs.requests, "post", return_value=_resp(500)) as post,
         mock.patch.object(vs.time, "sleep") as sleep,
     ):
         with pytest.raises(requests.exceptions.HTTPError):
             vs._call_glm("data:image/png;base64,AAAA", "p")
-    assert post.call_count == 4
-    assert sleep.call_count == 3
+    assert post.call_count == 3
+    assert sleep.call_count == 2
 
 
 def test_call_glm_api_error_payload(monkeypatch):

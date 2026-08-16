@@ -60,10 +60,10 @@ vision_server.py（本机 stdio 进程）
 
 `vision_server.py` 一共四个部分，按顺序阅读：
 
-1. **配置区**（约 30-49 行）：定义智谱 API 地址 `https://open.bigmodel.cn/api/paas/v4/chat/completions` 和模型名 `glm-4.6v-flash`；从环境变量读取 `ZHIPU_API_KEY`，如果同目录有 `.env` 文件则自动加载其中的变量。`FastMCP("glm-vision")` 创建服务实例，`main()` 作为入口启动 stdio 服务。
-2. **`_image_to_base64`**（54-63 行）：校验文件存在，用 `mimetypes` 推断图片类型，读字节、base64 编码，拼成 data URL。
-3. **`_call_glm`**（66-115 行）：组装 OpenAI 兼容格式的请求体（`messages` 里图文混合，图片在前、文字 prompt 在后），带 `Bearer` Key 调智谱接口，从返回的 `choices[0].message.content` 里取出文字结果；对 429 限流与 5xx 服务端错误内置最多 3 次指数退避重试（1s/2s/4s），避免免费模型临时限流导致调用失败。
-4. **`vision` 工具**（122-140 行）：用 `@mcp.tool()` 装饰器把函数暴露成 MCP 工具。参数 `image_path` 必填，`prompt` 可选，不填则使用默认的"描述 + OCR"指令。
+1. **配置区**（约 32-50 行）：定义智谱 API 地址 `https://open.bigmodel.cn/api/paas/v4/chat/completions`、首选模型 `glm-4.6v-flash` 与降级模型 `glm-4v-flash`；从环境变量读取 `ZHIPU_API_KEY`，如果同目录有 `.env` 文件则自动加载其中的变量。`FastMCP("glm-vision")` 创建服务实例，`main()` 作为入口启动 stdio 服务。
+2. **`_image_to_base64`**（56-65 行）：校验文件存在，用 `mimetypes` 推断图片类型，读字节、base64 编码，拼成 data URL。
+3. **`_call_glm` / `_try_request`**（68-120 行）：组装 OpenAI 兼容格式的请求体（`messages` 里图文混合，图片在前、文字 prompt 在后），带 `Bearer` Key 调智谱接口，从返回的 `choices[0].message.content` 里取出文字结果。`_try_request` 对 429 限流与 5xx 服务端错误做指数退避重试（2s/4s/8s）；**429 重试耗尽后自动降级到 `glm-4v-flash` 再试一次**，两个模型都被限流则返回可读错误。
+4. **`vision` 工具**（127-145 行）：用 `@mcp.tool()` 装饰器把函数暴露成 MCP 工具。参数 `image_path` 必填，`prompt` 可选，不填则使用默认的"描述 + OCR"指令。
 
 一个必须注意的坑：**`mcp` 包要固定 1.x 版本**。`mcp` 2.x 是一次重大重构，移除了 `mcp.server.fastmcp`，代码会直接报 `ModuleNotFoundError`。所以 `pyproject.toml` / `requirements.txt` 都写成 `mcp>=1.2.0,<2`。
 
@@ -162,7 +162,9 @@ from mcp.server.fastmcp import FastMCP  # 官方 Python SDK
 # 配置
 # ---------------------------------------------------------------------------
 ZHIPU_API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-MODEL = "glm-4.6v-flash"  # 免费模型，能力全面超过旧版 glm-4v-flash（128K 上下文、原生 Function Calling）
+# 优先使用新模型；429 限流重试耗尽后自动降级到旧免费模型
+MODEL = "glm-4.6v-flash"  # 首选：128K 上下文
+FALLBACK_MODEL = "glm-4v-flash"  # 降级：免费档限流更宽松
 
 # 从环境变量读取 key；若同目录存在 .env，则自动加载
 _DOT_ENV = Path(__file__).resolve().parent / ".env"
@@ -194,10 +196,10 @@ def _image_to_base64(image_path: str) -> tuple[str, str]:
 
 
 def _call_glm(image_data_url: str, prompt: str, timeout: int = 60) -> str:
-    """调用 GLM-4.6V-Flash 视觉接口，返回文字结果。
+    """调用视觉接口，返回文字结果。
 
-    免费模型偶发 429 限流与 5xx 服务端错误，属瞬时故障，
-    这里做最多 3 次指数退避重试（1s/2s/4s），仍失败才抛错。
+    优先使用 MODEL；429 限流在本模型上重试耗尽后，自动降级到
+    FALLBACK_MODEL 再试一次；两个模型都被限流则给出可读错误。
     """
     if not API_KEY:
         raise RuntimeError(
@@ -205,44 +207,47 @@ def _call_glm(image_data_url: str, prompt: str, timeout: int = 60) -> str:
             "并写入环境变量或本目录的 .env 文件。"
         )
 
-    payload = {
-        "model": MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_data_url}},
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ],
-    }
+    content = [
+        {"type": "image_url", "image_url": {"url": image_data_url}},
+        {"type": "text", "text": prompt},
+    ]
+
+    for model in (MODEL, FALLBACK_MODEL):
+        payload = {"model": model, "messages": [{"role": "user", "content": content}]}
+        resp = _try_request(payload, timeout)
+        if resp is not None:
+            data = resp.json()
+            if "error" in data:
+                raise RuntimeError(f"智谱 API 返回错误: {data['error']}")
+            return data["choices"][0]["message"]["content"]
+
+    raise RuntimeError("智谱接口持续限流(429)，glm-4.6v-flash 与 glm-4v-flash 均已重试，请稍后几分钟再试")
+
+
+def _try_request(payload: dict, timeout: int, max_retries: int = 2, backoff: float = 2.0):
+    """带退避地投递一次请求，返回可判定的 response。
+
+    429 与 5xx 属瞬时故障，指数退避重试（2s/4s/8s）；
+    429 重试耗尽返回 None（触发上层切换模型），5xx 重试耗尽抛错。
+    """
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
     }
-
-    # 429 限流与 5xx 服务端错误属瞬时故障，指数退避重试（1s/2s/4s）
-    max_retries = 3
-    backoff = 1.0
+    wait = backoff
     for attempt in range(max_retries + 1):
         resp = requests.post(
             ZHIPU_API_URL, headers=headers, json=payload, timeout=timeout
         )
         if resp.status_code != 429 and resp.status_code < 500:
-            break
+            return resp
         if attempt == max_retries:
-            break  # 重试耗尽，由下方 raise_for_status 抛出
-        time.sleep(backoff)
-        backoff *= 2
-
-    resp.raise_for_status()
-    data = resp.json()
-
-    if "error" in data:
-        raise RuntimeError(f"智谱 API 返回错误: {data['error']}")
-
-    return data["choices"][0]["message"]["content"]
+            if resp.status_code == 429:
+                return None  # 限流重试耗尽，交给调用方切换模型
+            resp.raise_for_status()
+        time.sleep(wait)
+        wait *= 2
+    return None  # 不可达
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +315,7 @@ if __name__ == "__main__":
 | 报错"找不到图片文件" | `image_path` 必须是绝对路径，且是运行 MCP 进程的那台机器上的路径（云端环境传本地路径会找不到） |
 | 调用后长时间无响应或超时 | 视觉模型推理较慢，把 `mcp.json` 的 `RUN_MCP_TIMEOUT_MS` 调大（本项目为 90000） |
 | 返回"网络错误 / Connection"类异常 | 本机或云端环境无法访问智谱接口；检查网络与代理设置 |
-| 返回 "429 Too Many Requests" | 免费模型触发限流，属瞬时状态，稍等 1-2 分钟自动恢复；脚本已内置最多 3 次指数退避重试（1s/2s/4s），仍频繁出现可错开使用时段 |
+| 返回 "429 Too Many Requests" | 免费模型限流，属瞬时状态：脚本会自动退避（2s/4s/8s）并降级到 `glm-4v-flash` 重试；两个模型都被限流时稍等 1-2 分钟即可 |
 | 中文出现乱码 | 文件必须保持 UTF-8 编码保存，尤其 Windows 下不要用 GBK |
 
 ## 十、安全与注意事项
