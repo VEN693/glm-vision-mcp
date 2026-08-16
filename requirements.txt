@@ -1,0 +1,4 @@
+# 注意：mcp 2.x 是重大重构版，已移除 mcp.server.fastmcp。
+# 固定使用 1.x 稳定线，提供 FastMCP API。
+mcp>=1.2.0,<2
+requests>=2.31.0

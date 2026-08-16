@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "glm-vision": {
+      "command": "<你的-Python-路径>",
+      "args": [
+        "<本项目绝对路径>/vision_server.py"
+      ],
+      "env": {
+        "ZHIPU_API_KEY": "<你的-智谱-API-Key>",
+        "RUN_MCP_TIMEOUT_MS": "90000"
+      }
+    }
+  }
+}

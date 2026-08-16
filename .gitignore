@@ -1,0 +1,15 @@
+# 敏感信息
+.env
+
+# Python 缓存与测试/构建产物
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.coverage
+build/
+dist/
+*.egg-info/
+
+# 虚拟环境
+.venv/
